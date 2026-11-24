@@ -127,6 +127,16 @@ const evs = (r, e) => r.lines.filter((l) => l.e === e);
   ok(r.last().run === 0 && r.last().a === 0, "STOP ferma la modalità PID");
 }
 {
+  const r = rig({ x0: 35, length: 70 });
+  r.send({ c: "tune", on: 1, sp: 20, kp: 2, ki: 0, kd: 1, launch: -8 });
+  r.run(1000);
+  ok(r.last().run === 1 && r.last().pid === 0 && Math.abs(r.last().a + 8) < 0.5, "tune: mantiene l'inclinazione di lancio durante il conto alla rovescia");
+  r.run(1900);
+  ok(r.last().pid === 0, "tune: il PID resta spento fino alla fine dei 3 s");
+  r.run(200);
+  ok(r.last().run === 1 && r.last().pid === 1, "tune: PID avviato dopo la fase di lancio");
+}
+{
   const r = rig({ x0: 30 });
   r.send({ c: "tune", on: 1, sp: 20, kp: 2, ki: 0, kd: 1 }); r.run(1000);
   r.run(3000, false);
@@ -160,28 +170,48 @@ const evs = (r, e) => r.lines.filter((l) => l.e === e);
   r.sim.setBallPresent(true); r.run(500);
   ok(r.last().ok === 1 && r.last().run === 1, "programma: palla di nuovo visibile");
 }
-// Competizione: conto alla rovescia, palla in fondo (cieca), gara 60 s, valori bloccati, punteggio
+// Competizione: conto alla rovescia, PID regolabile, gara 60 s e punteggio
 {
   const r = rig({ length: 70, x0: 35, blindBeyond: 62, autoPlace: true });
   r.send({ c: "hello" });
   r.send({ c: "comp", on: 1, sp: 30, kp: 2, ki: 0, kd: 1 });
   r.run(1000);
-  ok(evs(r, "comp_countdown").length === 1 && r.last().cs === 1 && r.last().run === 1 && r.last().ct <= 4100, "competizione: conto alla rovescia partito");
+  ok(evs(r, "comp_countdown").length === 1 && r.last().cs === 1 && r.last().run === 1 && r.last().ct <= 2100, "competizione: conto alla rovescia partito");
   ok(r.last().ok === 0 && r.last().a < -3, `competizione: palla in fondo non vista, trave inclinata verso il sensore (a=${r.last().a})`);
   r.send({ c: "tune", on: 1, sp: 10 });
-  ok(evs(r, "err").some((e) => e.m === "competizione in corso"), "competizione: tune rifiutato");
+  ok(evs(r, "err").some((e) => e.m === "competizione in corso"), "competizione: tune con on rifiutato");
+  r.send({ c: "tune", sp: 32, kp: 2.5, ki: 0.1, kd: 1 });
+  r.run(100);
+  ok(r.last().cs === 1 && r.last().sp === 32 && evs(r, "err").length === 1, "competizione: parametri PID regolabili durante il conto alla rovescia");
   r.send({ c: "run" }); r.send({ c: "cfg", center: 90 });
   ok(evs(r, "err").length === 3, "competizione: run e cfg rifiutati");
-  r.run(4500);
-  ok(evs(r, "comp_start").length === 1 && r.last().cs === 2, "competizione: gara partita dopo 5 s");
+  r.run(1800);
+  ok(evs(r, "comp_start").length === 0 && r.last().cs === 1, "competizione: conto alla rovescia dura almeno 3 s");
+  r.run(200);
+  ok(evs(r, "comp_start").length === 1 && r.last().cs === 2, "competizione: gara partita dopo 3 s");
+  r.send({ c: "tune", sp: 31, kp: 1.8, ki: 0, kd: 1 });
+  r.run(100);
+  ok(r.last().cs === 2 && r.last().sp === 31 && evs(r, "err").length === 3, "competizione: obiettivo e PID aggiornabili durante la gara");
+  r.sim.setBallPresent(false);
   r.run(61000);
   const end = evs(r, "comp_end")[0];
   ok(end && end.abort === 0 && end.ticks === 1200 && end.w.length === 10, "competizione: fine gara dopo 60 s con 1200 campioni");
   ok(evs(r, "comp_win").length === 10, "competizione: 10 eventi finestra");
-  ok(end && end.pts >= 5, `competizione: PID stabilizza la palla, punti ${end && end.pts.toFixed(2)} (mae ${end && end.mae.toFixed(2)})`);
+  ok(end && end.pts < 10, `competizione: punteggio sotto il massimo se la palla non è visibile (${end && end.pts.toFixed(2)})`);
   ok(r.last().cs === 3 && r.last().run === 0 && Math.abs(r.last().a) < 1, "competizione: finita, trave livellata");
   r.send({ c: "comp", on: 0 }); r.run(200);
   ok(r.last().cs === undefined, "competizione: chiusura risultati");
+}
+{
+  const r = rig({ length: 70, x0: 35, noise: 0 });
+  r.send({ c: "comp", on: 1, sp: 35, kp: 2, ki: 0, kd: 1, launch: 0 });
+  r.run(3000);
+  r.run(30000);
+  const end = evs(r, "comp_end");
+  ok(end.length === 1 && end[0].abort === 0 && end[0].early === 1 && end[0].pts === 10,
+    "competizione: raggiunti 10 punti, conclusione anticipata con punteggio invariato");
+  ok(end.length === 1 && end[0].ticks < 1200 && r.last().cs === 3 && r.last().ct === 0 && r.last().run === 0 && r.last().a === 0,
+    "competizione: timer fermato e normale procedura di fine gara eseguita prima dei 60 s");
 }
 {
   const r = rig({ length: 70, x0: 35 });

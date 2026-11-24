@@ -1,10 +1,10 @@
 // Punteggio della competizione — gemello di firmware/lib/scorer/scorer.h (stesse regole, stessi test).
-// 60 s = 10 finestre da 6 s; un campione ogni 50 ms vale "dentro" se la misura è recente e |errore| <= 2 cm.
-// Ogni finestra vale (campioni dentro / 120) punti; totale 0..10.
+// 60 s = 10 finestre da 6 s; un campione ogni 50 ms vale "dentro" se la misura è recente e |errore| <= 6 cm.
+// Ogni finestra vale fino a 2.5 punti; il totale è limitato a 10.
 (function (root) {
   "use strict";
   const f = Math.fround;
-  const WINDOWS = 10, TICKS_PER_WINDOW = 120, TOTAL_TICKS = WINDOWS * TICKS_PER_WINDOW, BAND = f(2.0), UNSEEN_ERR = 35;
+  const WINDOWS = 10, TICKS_PER_WINDOW = 120, TOTAL_TICKS = WINDOWS * TICKS_PER_WINDOW, BAND = f(6.0), UNSEEN_ERR = 35;
 
   class Scorer {
     constructor() { this.reset(); }
@@ -20,8 +20,9 @@
       this.ticks++;
       return this.ticks % TICKS_PER_WINDOW === 0 ? w : -1;
     }
-    windowPoints(w) { return f(this.inW[w] / TICKS_PER_WINDOW); }
-    points() { let s = 0; for (let w = 0; w < WINDOWS; w++) s = f(s + this.windowPoints(w)); return s; }
+    windowFill(w) { return f(this.inW[w] / TICKS_PER_WINDOW); }
+    windowPoints(w) { return f(this.windowFill(w) * 2.5); }
+    points() { let s = 0; for (let w = 0; w < WINDOWS; w++) s = f(s + this.windowPoints(w)); return Math.min(10, s); }
     mae() { return this.ticks ? f(this.absErr / this.ticks) : 0; }
   }
 

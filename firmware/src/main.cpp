@@ -24,7 +24,7 @@ extern const uint8_t page_gz_end[]   asm("_binary_embed_page_html_gz_end");
 #define PIN_SCL   22
 #define BAUD      115200
 #define FW_VERSION "1.7"
-#define COMP_COUNTDOWN_MS 5000   // competizione: conto alla rovescia (tempo per mettere la palla in fondo alla trave)
+#define COMP_COUNTDOWN_MS 3000   // conto alla rovescia "3, 2, 1, VIA!"
 #define COMP_RUN_MS       60000  // durata della gara
 #define COMP_TICK_MS      50     // un campione di punteggio ogni 50 ms
 #define COMP_LAUNCH_DEG   -6.0f  // inclinazione durante il conto alla rovescia: la palla rotola verso il sensore
@@ -50,6 +50,10 @@ static volatile bool  g_pid = false;
 static volatile float g_kp = 2, g_ki = 0, g_kd = 1;
 static volatile bool  g_running = false;
 static volatile bool  g_tune = false;     // modalità PID: parametri regolati dal browser, nessun programma
+static volatile bool  g_tuneLaunchActive = false;
+static volatile float g_tuneLaunch = COMP_LAUNCH_DEG;
+static volatile uint32_t g_tuneLaunchLeft = 0;
+static uint32_t tuneLaunchT0 = 0;
 static volatile bool  g_stopReq = false;
 static volatile bool  g_startReq = false;
 static volatile uint32_t g_lastPing = 0;
@@ -59,6 +63,7 @@ static volatile int g_cur = -1;         // indice dell'istruzione in esecuzione 
 // ---------- Competizione ----------
 static volatile int g_comp = 0;                 // 0 spenta, 1 conto alla rovescia, 2 gara, 3 finita
 static volatile bool g_compAborted = false;
+static volatile bool g_compEarly = false;
 static volatile float g_compPts = 0;            // punti (live)
 static volatile int g_compWin = 0;              // finestra in corso (0..9)
 static volatile uint32_t g_compLeft = 0;        // ms rimasti nella fase corrente
@@ -128,16 +133,17 @@ static void setManual(float angle) {
 static void stopAll() { setManual(0); }
 
 // Fine gara (naturale o interrotta). Da chiamare con servoMutex preso.
-static void compFinish(bool aborted) {
-  g_comp = 3; g_compAborted = aborted; g_pid = false; g_compLeft = 0;
+static void compFinish(bool aborted, bool early = false) {
+  g_comp = 3; g_compAborted = aborted; g_compEarly = early; g_pid = false; g_compLeft = 0;
   writeServo(0);
 }
 static void sendCompEnd() {
   JsonDocument d;
-  d["e"] = "comp_end"; d["abort"] = g_compAborted ? 1 : 0;
+  d["e"] = "comp_end"; d["abort"] = g_compAborted ? 1 : 0; d["early"] = g_compEarly ? 1 : 0;
   d["pts"] = scorer.points(); d["mae"] = scorer.mae(); d["ticks"] = scorer.ticks;
   JsonArray w = d["w"].to<JsonArray>();
-  for (int i = 0; i < bb::Scorer::WINDOWS; i++) w.add(scorer.windowPoints(i));
+  JsonArray wf = d["wf"].to<JsonArray>();
+  for (int i = 0; i < bb::Scorer::WINDOWS; i++) { w.add(scorer.windowPoints(i)); wf.add(scorer.windowFill(i)); }
   d["sp"] = g_sp; d["kp"] = g_kp; d["ki"] = g_ki; d["kd"] = g_kd;
   sendDoc(d);
 }
@@ -225,11 +231,19 @@ static void controlTask(void*) {
     if (compActive() && millis() - g_lastPing > 2000) { sendErr("connessione persa: stop"); compFail = true; }
 
     uint32_t age = millis() - g_lastGood;               // da quanto non vedo la palla
-    int evWin = -1; bool evStart = false, evEnd = false, compHold = false;
+    int evWin = -1; bool evStart = false, evTuneStart = false, evEnd = false, compHold = false, tuneLaunchHold = false;
     xSemaphoreTake(servoMutex, portMAX_DELAY);
-    if (tuneFail) { g_tune = false; g_pid = false; }
+    if (tuneFail) { g_tune = false; g_pid = false; g_tuneLaunchActive = false; g_tuneLaunchLeft = 0; }
     if (compFail) { compFinish(true); evEnd = true; }
     uint32_t nowMs = millis();
+    if (g_tuneLaunchActive && g_tune) {
+      uint32_t el = nowMs - tuneLaunchT0;
+      if (el >= COMP_COUNTDOWN_MS) {
+        g_tuneLaunchActive = false; g_tuneLaunchLeft = 0; g_pid = true; evTuneStart = true;
+      } else {
+        g_tuneLaunchLeft = COMP_COUNTDOWN_MS - el; g_pid = false; tuneLaunchHold = true;
+      }
+    }
     if (g_comp == 1) {                                  // conto alla rovescia: trave inclinata verso il sensore, PID spento
       uint32_t el = nowMs - compT0;
       if (el >= COMP_COUNTDOWN_MS) {
@@ -247,7 +261,8 @@ static void controlTask(void*) {
       if (!compArmed) {                                  // finché il sensore non vede la palla resta l'inclinazione di lancio
         if (age <= 100) { compArmed = true; g_pid = true; } else { g_pid = false; compHold = true; }
       }
-      if (el >= COMP_RUN_MS) { compFinish(false); evEnd = true; }
+      if (g_compPts >= bb::Scorer::MAX_POINTS && el < COMP_RUN_MS) { compFinish(false, true); evEnd = true; }
+      else if (el >= COMP_RUN_MS) { compFinish(false); evEnd = true; }
     }
     if (g_pid && age <= HOLD_MS) {
       float pos = g_pos;                                // se la palla è persa: ultima posizione nota
@@ -277,9 +292,14 @@ static void controlTask(void*) {
     if (g_stopReq) { g_pid = false; writeServo(0); }
     if (tuneFail) writeServo(0);
     if (compHold && g_comp != 3) writeServo(g_compLaunch);
+    if (tuneLaunchHold && g_tune) writeServo(g_tuneLaunch);
     xSemaphoreGive(servoMutex);
     if (evStart) sendEv("comp_start");
-    if (evWin >= 0) { JsonDocument w; w["e"] = "comp_win"; w["i"] = evWin; w["p"] = scorer.windowPoints(evWin); sendDoc(w); }
+    if (evTuneStart) sendEv("tune_start");
+    if (evWin >= 0) {
+      JsonDocument w; w["e"] = "comp_win"; w["i"] = evWin;
+      w["p"] = scorer.windowPoints(evWin); w["f"] = scorer.windowFill(evWin); sendDoc(w);
+    }
     if (evEnd) sendCompEnd();
 
     vTaskDelayUntil(&last, pdMS_TO_TICKS(CTRL_MS));
@@ -322,8 +342,8 @@ static void handleLine(const char* line) {
     g_progLoaded = !g_prog["p"].isNull();
     if (g_progLoaded) sendEv("ok"); else sendErr("programma vuoto");
   } else if (!strcmp(c, "tune")) {
-    // {"c":"tune","on":1,"sp":20,"kp":2,"ki":0,"kd":1} — tutti i campi opzionali; il PID resta sull'ESP
-    if (compActive()) { sendErr("competizione in corso"); return; }   // durante la gara i valori sono bloccati
+    // launch opzionale: inclinazione mantenuta 3 s, poi si attiva il PID.
+    if (compActive() && !d["on"].isNull()) { sendErr("competizione in corso"); return; }
     if (g_running) { sendErr("ferma il programma prima"); return; }
     bool refuse = false;
     xSemaphoreTake(servoMutex, portMAX_DELAY);
@@ -334,14 +354,23 @@ static void handleLine(const char* line) {
     if (!d["on"].isNull()) {
       if (d["on"].as<int>() != 0) {
         if (!g_posOk) refuse = true;
-        else { g_stopReq = false; g_tune = true; g_pid = true; }
-      } else { g_tune = false; g_pid = false; writeServo(0); }
+        else {
+          g_stopReq = false; g_tune = true;
+          if (d["launch"].is<float>()) {
+            g_tuneLaunch = clampf(d["launch"], -HARD_LIMIT, 0);
+            tuneLaunchT0 = millis(); g_tuneLaunchLeft = COMP_COUNTDOWN_MS; g_tuneLaunchActive = true; g_pid = false;
+            writeServo(g_tuneLaunch);
+          } else {
+            g_tuneLaunchActive = false; g_tuneLaunchLeft = 0; g_pid = true;
+          }
+        }
+      } else { g_tune = false; g_pid = false; g_tuneLaunchActive = false; g_tuneLaunchLeft = 0; writeServo(0); }
     }
     xSemaphoreGive(servoMutex);
     if (refuse) sendErr("sensore non valido");
   } else if (!strcmp(c, "comp")) {
-    // {"c":"comp","on":1,"sp":35,"kp":1.5,"ki":0,"kd":0.05,"launch":-6}: conto alla rovescia di 5 s (trave inclinata verso il sensore,
-    // si mette la palla in fondo), poi 60 s di gara con PID e valori bloccati. {"c":"comp","on":0} annulla / chiude i risultati.
+    // {"c":"comp","on":1,"sp":35,"kp":1.5,"ki":0,"kd":0.05,"launch":-6}: conto alla rovescia di 3 s (trave inclinata verso il sensore,
+    // si mette la palla in fondo), poi 60 s di gara con PID regolabile via tune. {"c":"comp","on":0} annulla / chiude i risultati.
     if (!(d["on"] | 1)) {
       if (compActive()) { xSemaphoreTake(servoMutex, portMAX_DELAY); compFinish(true); xSemaphoreGive(servoMutex); sendCompEnd(); }
       g_comp = 0;
@@ -355,7 +384,8 @@ static void handleLine(const char* line) {
       if (d["kd"].is<float>()) g_kd = clampf(d["kd"], 0, 20);
       g_compLaunch = d["launch"].is<float>() ? clampf(d["launch"], -HARD_LIMIT, 0) : COMP_LAUNCH_DEG;   // sempre verso il sensore
       g_tune = false; g_stopReq = false; g_pid = false;
-      scorer.reset(); g_compPts = 0; g_compWin = 0; g_compAborted = false; compTick = 0; compArmed = false;
+      g_tuneLaunchActive = false; g_tuneLaunchLeft = 0;
+      scorer.reset(); g_compPts = 0; g_compWin = 0; g_compAborted = false; g_compEarly = false; compTick = 0; compArmed = false;
       compT0 = millis(); g_compLeft = COMP_COUNTDOWN_MS; g_comp = 1;
       writeServo(g_compLaunch);
       xSemaphoreGive(servoMutex);
@@ -368,12 +398,13 @@ static void handleLine(const char* line) {
     if (!g_posOk) { sendErr("sensore non valido"); return; }
     g_stopReq = false;
     g_tune = false;
+    g_tuneLaunchActive = false; g_tuneLaunchLeft = 0;
     g_running = true;     // subito, così "prog" e "stop" successivi vedono lo stato corretto
     g_startReq = true;
   } else if (!strcmp(c, "stop")) {
     if (compActive()) { xSemaphoreTake(servoMutex, portMAX_DELAY); compFinish(true); xSemaphoreGive(servoMutex); sendCompEnd(); }
     g_stopReq = true;
-    if (!g_running) { g_tune = false; stopAll(); g_stopReq = false; }
+    if (!g_running) { g_tune = false; g_tuneLaunchActive = false; g_tuneLaunchLeft = 0; stopAll(); g_stopReq = false; }
   } else if (!strcmp(c, "angle")) {
     if (!g_running && !g_tune && !compActive()) setManual(d["v"] | 0.0f);
   } else {
@@ -495,6 +526,7 @@ void loop() {
     t["ok"] = g_posOk ? 1 : 0;
     if (g_running && g_cur >= 0) t["s"] = (int)g_cur;
     if (g_comp) { t["cs"] = (int)g_comp; t["ct"] = (uint32_t)g_compLeft; t["cp"] = serialized(String((float)g_compPts, 2)); t["cw"] = (int)g_compWin; }
+    if (g_tuneLaunchActive) t["tl"] = (uint32_t)g_tuneLaunchLeft;
     sendDoc(t);
   }
   delay(2);

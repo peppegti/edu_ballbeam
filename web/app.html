@@ -106,6 +106,7 @@
   #compBar .big { font-size:54px; font-weight:800; line-height:1; font-variant-numeric:tabular-nums; min-width:2.2ch; text-align:center; }
   #compBar .lbl { font-size:11.5px; color:var(--muted); text-transform:uppercase; letter-spacing:.09em; font-weight:700; }
   #compBar .col { display:flex; flex-direction:column; gap:2px; }
+  #compBar.pid-launch > .col:nth-child(2), #compBar.pid-launch #compWins { display:none; }
   #compMsg { flex:1; min-width:220px; font-size:17px; font-weight:600; }
   #compWins { display:flex; gap:4px; width:100%; }
   #compWins span { flex:1; height:22px; border-radius:6px; background:var(--hover); border:1px solid var(--line); position:relative; overflow:hidden; }
@@ -114,6 +115,10 @@
   #compRes { border-color:#16a34a; }
   #compRes .score { font-size:64px; font-weight:800; line-height:1; } #compRes .score small { font-size:22px; color:var(--muted); font-weight:600; }
   #compRes .row2 { display:flex; gap:20px; align-items:center; flex-wrap:wrap; }
+  #compSuccess { position:fixed; inset:0; z-index:1000; display:grid; place-items:center; padding:24px; color:#f59e0b;
+    font:800 clamp(2rem,5vw,4rem)/1.1 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; text-align:center;
+    text-shadow:0 2px 6px rgba(0,0,0,.65),0 0 18px rgba(0,0,0,.25); pointer-events:none; }
+  #compSuccess span { max-width:min(1000px,90vw); }
   .locked { opacity:.55; pointer-events:none; }
   .pidactions { display:flex; gap:10px; margin-top:10px; align-items:center; }
   .pidactions .hint { flex:1; }
@@ -132,6 +137,7 @@
 </style>
 </head>
 <body>
+<div id="compSuccess" role="status" aria-live="polite" hidden><span>Hai stabilizzato il sistema prima del tempo, competizione conclusa!</span></div>
 <header>
   <div class="logo">
     <svg width="34" height="34" viewBox="0 0 34 34" aria-hidden="true"><g transform="rotate(-8 17 20)"><rect x="2" y="19" width="30" height="4.5" rx="2.2" fill="#e2e8f0"/><circle cx="23" cy="14.5" r="5" fill="#60a5fa"/><circle cx="21.6" cy="13" r="1.6" fill="#dbeafe"/></g><path d="M17 24 L11 32 H23 Z" fill="#c4b5fd"/></svg>
@@ -210,7 +216,7 @@
         <div class="pidactions">
           <button id="pidRun" class="go" disabled>▶ AVVIA PID</button>
           <button id="pidStop" class="stop" disabled>■ STOP</button>
-          <button id="compGo" class="comp" disabled title="Conto alla rovescia di 5 s, poi 60 s di gara: i valori restano bloccati">🏆 COMPETIZIONE</button>
+          <button id="compGo" class="comp" disabled title="Conto alla rovescia 3, 2, 1, VIA!, poi 60 s di gara con parametri PID regolabili">🏆 COMPETIZIONE</button>
           <label class="launch">inclinazione di lancio <input type="number" id="launchDeg" min="1" max="20" step="1" value="6">°</label>
         </div>
       </div>
